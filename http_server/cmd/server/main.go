@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -114,63 +115,80 @@ func handleRequest(req *Request) *Response { //Take a Request, return a Response
 	resp := &Response{
 		StatusCode: statusCode,
 		StatusText: statusText,
-		Headers:    make(map[string]string),
+		Headers:    make(map[string]string), // empty for now
 		Body:       responseBody,
 	}
 
 	return resp
 }
 
-func sendResponse(conn net.Conn, resp *Response) { //Write Response to connection
+func sendResponse(conn net.Conn, resp *Response) error { //Write Response to connection
 	contentLength := len(resp.Body)
 	statusLine := fmt.Sprintf("HTTP/1.1 %d %s", resp.StatusCode, resp.StatusText)
 	response := fmt.Sprintf("%s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", statusLine, contentLength, resp.Body)
-	conn.Write([]byte(response))
-
+	_, err := conn.Write([]byte(response))
+	return err
 }
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
-
-	// Lets create buffer and read the curl req
+	shouldClose := false
 	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
 
-	if err != nil {
-		log.Println("Error while reading buffer:", err)
-		return
-	}
+	for { // read the curl req
 
-	req, respErr := parseRequest(buffer, n)
+		n, err := conn.Read(buffer)
 
-	if respErr != nil {
-		log.Println(respErr)
-		resp := &Response{
-			StatusCode: 400,
-			StatusText: "Bad Request",
-			Body:       "Invalid request format",
-			Headers:    make(map[string]string),
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Println("Error while reading buffer:", err)
+			break
 		}
-		sendResponse(conn, resp)
-		return
-	}
 
-	//Validate Host header
-	if req.Headers["Host"] == "" {
-		resp := &Response{
-			StatusCode: 400,
-			StatusText: "Bad Request",
-			Body:       "Missing Host header",
-			Headers:    make(map[string]string),
+		req, respErr := parseRequest(buffer, n)
+
+		if respErr != nil {
+			log.Println(respErr)
+			resp := &Response{
+				StatusCode: 400,
+				StatusText: "Bad Request",
+				Body:       "Invalid request format",
+				Headers:    make(map[string]string), // empty for now
+			}
+			sendResponse(conn, resp)
+			continue
 		}
-		sendResponse(conn, resp)
-		return
+
+		//Validate Host header
+		if req.Headers["Host"] == "" {
+			resp := &Response{
+				StatusCode: 400,
+				StatusText: "Bad Request",
+				Body:       "Missing Host header",
+				Headers:    make(map[string]string),
+			}
+			sendResponse(conn, resp)
+			continue
+		}
+
+		resp := handleRequest(req)
+
+		if req.Headers["Connection"] == "close" {
+			shouldClose = true
+			resp.Headers["Connection"] = "close"
+		}
+		fmt.Println("Connected! Accepted from:", conn.RemoteAddr())
+		if err := sendResponse(conn, resp); err != nil {
+			log.Println("Error sending a response:", err)
+			break
+		}
+
+		if shouldClose {
+			break
+		}
 	}
-
-	resp := handleRequest(req)
-
-	fmt.Println("Connected! Accepted from:", conn.RemoteAddr())
-	sendResponse(conn, resp)
 }
 
 // ---------------------------------------------------------------------//
